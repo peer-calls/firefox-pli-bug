@@ -23,7 +23,7 @@ createButton('join', function() {
       return
     }
     pc.onicecandidate = e => {
-      console.log('ice candidate', e.candidate)
+      // console.log('ice candidate', e.candidate)
     }
     pc.onicegatheringstatechange = e => {
       console.log('ice gathering state', e.target.iceGatheringState)
@@ -33,6 +33,9 @@ createButton('join', function() {
       }
     }
   })
+  pc.oniceconnectionstatechange = e => {
+    console.log('ice connection state change', pc.iceConnectionState)
+  }
 
   const send = (type, payload) => ws.send(JSON.stringify({type, payload}))
 
@@ -79,6 +82,7 @@ createButton('join', function() {
   }
 
   pc.addEventListener('track', event => {
+    console.log('peer ontrack event', event.track)
     event.streams.forEach(stream => {
       addVideo(stream)
     })

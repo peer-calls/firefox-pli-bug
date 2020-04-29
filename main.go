@@ -197,7 +197,7 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		tracksChan <- remoteTrack
+		tracksChan <- localTrack
 	})
 
 	addTrack := func(recvPeer *Peer, srcPeer *Peer, track *webrtc.Track) {
