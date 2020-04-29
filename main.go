@@ -21,9 +21,9 @@ import (
 func main() {
 	router := chi.NewRouter()
 
-	router.Handle("/static/*", static("/static", packr.NewBox("./static")))
 	h := NewMainHandler()
 	router.Mount("/ws", h)
+	router.Handle("/*", static("/", packr.NewBox("./static")))
 
 	port := "3000"
 	l, err := net.Listen("tcp", net.JoinHostPort("", port))
@@ -93,11 +93,11 @@ func NewMainHandler() *MainHandler {
 			Parameter: "pli",
 		},
 	}
+	mediaEngine.RegisterCodec(webrtc.NewRTPVP8CodecExt(webrtc.DefaultPayloadTypeVP8, 90000, rtcpfb, ""))
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithSettingEngine(settingEngine),
 	)
-	mediaEngine.RegisterCodec(webrtc.NewRTPVP8CodecExt(webrtc.DefaultPayloadTypeVP8, 90000, rtcpfb, ""))
 
 	return &MainHandler{
 		api:   api,
@@ -131,12 +131,18 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	chkErr(err)
 
 	id := atomic.AddUint32(&m.peerIds, 1)
+	log.Printf("[%d] ws connected", id)
 
 	defer func() {
 		c.Close(websocket.StatusInternalError, "")
 	}()
 
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
+	webrtcConfig := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{
+			URLs: []string{"stun:stun.l.google.com:19302"},
+		}},
+	}
+	pc, err := m.api.NewPeerConnection(webrtcConfig)
 	chkErr(err)
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("[%d] ice connection state change: %s", id, state)
@@ -156,9 +162,9 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		chkErr(err)
 	}
 	negotiate := func() {
-		log.Printf("[%d] negotiate create offer", id)
 		offer, err := pc.CreateOffer(nil)
 		chkErr(err)
+		log.Printf("[%d] negotiate create offer: %s", id, offer.SDP)
 
 		err = pc.SetLocalDescription(offer)
 		chkErr(err)
@@ -168,6 +174,7 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	tracksChan := make(chan *webrtc.Track)
 	pc.OnTrack(func(remoteTrack *webrtc.Track, receiver *webrtc.RTPReceiver) {
+		log.Printf("[%d] OnTrack ssrc: %d", id, remoteTrack.SSRC())
 		peer.mu.Lock()
 		defer peer.mu.Unlock()
 		localTrack, err := pc.NewTrack(remoteTrack.PayloadType(), remoteTrack.SSRC(), "copy:"+remoteTrack.ID(), "copy:"+remoteTrack.Label())
@@ -220,35 +227,38 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	msgChan := make(chan Message)
 	go func() {
-		select {
-		case msg := <-msgChan:
-			switch msg.Type {
-			case "ready":
-				for _, otherPeer := range m.peers {
-					for _, track := range otherPeer.localTracks {
-						addTrack(peer, otherPeer, track)
+		for {
+			select {
+			case msg := <-msgChan:
+				switch msg.Type {
+				case "ready":
+					for _, otherPeer := range m.peers {
+						for _, track := range otherPeer.localTracks {
+							addTrack(peer, otherPeer, track)
+						}
 					}
+					m.peers[id] = peer
+					negotiate()
+				case "answer":
+					var answer webrtc.SessionDescription
+					err := json.Unmarshal(msg.Payload, &answer)
+					chkErr(err)
+					log.Printf("[%d] Got answer: %s", id, answer.SDP)
+					err = pc.SetRemoteDescription(answer)
+					chkErr(err)
+				case "pub":
+					pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RtpTransceiverInit{
+						Direction: webrtc.RTPTransceiverDirectionRecvonly,
+					})
+					negotiate()
+				default:
+					log.Printf("[%d] Unhandled websocket message type: %s", id, msg.Type)
 				}
-				m.peers[id] = peer
-				negotiate()
-			case "answer":
-				var answer webrtc.SessionDescription
-				err := json.Unmarshal(msg.Payload, &answer)
-				chkErr(err)
-				err = pc.SetRemoteDescription(answer)
-				chkErr(err)
-			case "pub":
-				pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RtpTransceiverInit{
-					Direction: webrtc.RTPTransceiverDirectionRecvonly,
-				})
-				negotiate()
-			default:
-				log.Printf("[%d] Unknown websocket message type: %s", id, msg.Type)
-			}
-		case track := <-tracksChan:
-			for _, otherPeer := range m.peers {
-				if otherPeer.pc != pc {
-					addTrack(otherPeer, peer, track)
+			case track := <-tracksChan:
+				for _, otherPeer := range m.peers {
+					if otherPeer.pc != pc {
+						addTrack(otherPeer, peer, track)
+					}
 				}
 			}
 		}
@@ -266,6 +276,7 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msg := deserialize(m)
+		log.Printf("[%d] Websocket message type: %s", id, msg.Type)
 		msgChan <- msg
 	}
 }
