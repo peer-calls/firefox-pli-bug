@@ -234,24 +234,29 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sender, err := recvPeer.pc.AddTrack(track)
 		chkErr(err)
 		go func() {
-			pkts, err := sender.ReadRTCP()
-			if err != nil {
-				log.Printf("[%d] Error reading rtcp from sender: %d: %s", recvPeer.id, track.SSRC(), err)
-				return
-			}
-			for _, pkt := range pkts {
-				switch pkt.(type) {
-				case *rtcp.PictureLossIndication:
-					log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
-					err := srcPeer.pc.WriteRTCP([]rtcp.Packet{pkt})
-					if err != nil {
-						log.Printf("[%d] error writing rtcp packet for track ssrc %d: %s", recvPeer.id, track.SSRC(), err)
-						return
+			for {
+				pkts, err := sender.ReadRTCP()
+				if err != nil {
+					log.Printf("[%d] Error reading rtcp from sender: %d: %s", recvPeer.id, track.SSRC(), err)
+					return
+				}
+				for _, pkt := range pkts {
+					// log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
+					switch pkt.(type) {
+					case *rtcp.PictureLossIndication:
+						log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
+						err := srcPeer.pc.WriteRTCP([]rtcp.Packet{pkt})
+						if err != nil {
+							log.Printf("[%d] error writing rtcp packet for track ssrc %d: %s", recvPeer.id, track.SSRC(), err)
+							return
+						}
+					case *rtcp.ReceiverEstimatedMaximumBitrate:
+					case *rtcp.SourceDescription:
+					case *rtcp.ReceiverReport:
+					case *rtcp.SenderReport:
+					default:
+						log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
 					}
-				// case *rtcp.ReceiverEstimatedMaximumBitrate:
-				// case *rtcp.SourceDescription:
-				default:
-					log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
 				}
 			}
 		}()
