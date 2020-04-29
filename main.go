@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -19,9 +20,12 @@ import (
 )
 
 func main() {
+	pliInterval := flag.Int64("pli-interval", 0, "If set to X, enables sending on PLI packet every X seconds")
+	flag.Parse()
+
 	router := chi.NewRouter()
 
-	h := NewMainHandler()
+	h := NewMainHandler(*pliInterval)
 	router.Mount("/ws", h)
 	router.Handle("/*", static("/", packr.NewBox("./static")))
 
@@ -46,9 +50,10 @@ func chkErr(err error) {
 }
 
 type MainHandler struct {
-	peerIds uint32
-	api     *webrtc.API
-	peers   map[uint32]*Peer
+	pliInterval int64
+	peerIds     uint32
+	api         *webrtc.API
+	peers       map[uint32]*Peer
 }
 
 type Message struct {
@@ -78,7 +83,7 @@ type TrackReceiver struct {
 	sourcePeer Peer
 }
 
-func NewMainHandler() *MainHandler {
+func NewMainHandler(pliInterval int64) *MainHandler {
 	var mediaEngine webrtc.MediaEngine
 	var settingEngine webrtc.SettingEngine
 	settingEngine.SetTrickle(false)
@@ -100,8 +105,9 @@ func NewMainHandler() *MainHandler {
 	)
 
 	return &MainHandler{
-		api:   api,
-		peers: map[uint32]*Peer{},
+		api:         api,
+		peers:       map[uint32]*Peer{},
+		pliInterval: pliInterval,
 	}
 }
 
@@ -164,7 +170,7 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	negotiate := func() {
 		offer, err := pc.CreateOffer(nil)
 		chkErr(err)
-		log.Printf("[%d] negotiate create offer: %s", id, offer.SDP)
+		// log.Printf("[%d] negotiate create offer: %s", id, offer.SDP)
 
 		err = pc.SetLocalDescription(offer)
 		chkErr(err)
@@ -177,11 +183,34 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%d] OnTrack ssrc: %d", id, remoteTrack.SSRC())
 		peer.mu.Lock()
 		defer peer.mu.Unlock()
+
 		localTrack, err := pc.NewTrack(remoteTrack.PayloadType(), remoteTrack.SSRC(), "copy:"+remoteTrack.ID(), "copy:"+remoteTrack.Label())
 		peer.localTracks = append(peer.localTracks, localTrack)
 		chkErr(err)
 
+		var ticker *time.Ticker
+		if m.pliInterval > 0 {
+			log.Printf("[%d] Starting PLI ticker every %d seconds for track: %d", id, m.pliInterval, remoteTrack.SSRC())
+			ticker = time.NewTicker(time.Duration(m.pliInterval) * time.Second)
+			go func() {
+				for range ticker.C {
+					log.Printf("[%d] Sending PLI packet for track (interval): %d", id, remoteTrack.SSRC())
+					err := pc.WriteRTCP([]rtcp.Packet{
+						&rtcp.PictureLossIndication{
+							MediaSSRC: remoteTrack.SSRC(),
+						},
+					})
+					if err != nil {
+						log.Printf("[%d] Error sending PLI on interval: %s", id, err)
+					}
+				}
+			}()
+		}
+
 		go func() {
+			if ticker != nil {
+				defer ticker.Stop()
+			}
 			for {
 				rtp, err := remoteTrack.ReadRTP()
 				if err != nil {
@@ -214,9 +243,13 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				switch pkt.(type) {
 				case *rtcp.PictureLossIndication:
 					log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
-					srcPeer.pc.WriteRTCP([]rtcp.Packet{pkt})
-				case *rtcp.ReceiverEstimatedMaximumBitrate:
-				case *rtcp.SourceDescription:
+					err := srcPeer.pc.WriteRTCP([]rtcp.Packet{pkt})
+					if err != nil {
+						log.Printf("[%d] error writing rtcp packet for track ssrc %d: %s", recvPeer.id, track.SSRC(), err)
+						return
+					}
+				// case *rtcp.ReceiverEstimatedMaximumBitrate:
+				// case *rtcp.SourceDescription:
 				default:
 					log.Printf("[%d] rtcp packet for track ssrc %d: %T", recvPeer.id, track.SSRC(), pkt)
 				}
@@ -243,7 +276,7 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					var answer webrtc.SessionDescription
 					err := json.Unmarshal(msg.Payload, &answer)
 					chkErr(err)
-					log.Printf("[%d] Got answer: %s", id, answer.SDP)
+					// log.Printf("[%d] Got answer: %s", id, answer.SDP)
 					err = pc.SetRemoteDescription(answer)
 					chkErr(err)
 				case "pub":
@@ -252,7 +285,7 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					})
 					negotiate()
 				default:
-					log.Printf("[%d] Unhandled websocket message type: %s", id, msg.Type)
+					// log.Printf("[%d] Unhandled websocket message type: %s", id, msg.Type)
 				}
 			case track := <-tracksChan:
 				for _, otherPeer := range m.peers {
@@ -276,7 +309,6 @@ func (m *MainHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msg := deserialize(m)
-		log.Printf("[%d] Websocket message type: %s", id, msg.Type)
 		msgChan <- msg
 	}
 }
