@@ -1,7 +1,7 @@
 # Firefox PLI Bug
 
 Firefox does not send a RTCP Picture Loss Indicator (PLI) after a second track
-is added, and the second video never starts playing unless a PLI request is manually sent.
+is added, and the second video never starts playing unless a PLI package is manually created and sent to the source peer connection.
 
 How to run:
 
